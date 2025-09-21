@@ -1,0 +1,291 @@
+# vim: set ft=python:
+
+import os
+import sys
+import cv2
+import numpy as np
+import math
+
+from scipy.stats import gaussian_kde
+
+
+def most_crowded_value(data, bandwidth=None):
+    data = np.array(data)
+
+    # Estimate density
+    kde = gaussian_kde(data, bw_method=bandwidth)
+
+    # Evaluate density on a fine grid
+    x_grid = np.linspace(data.min(), data.max(), 500)
+    density = kde(x_grid)
+
+    # Return x value with highest density
+    return x_grid[np.argmax(density)]
+
+
+
+def findDisks(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    ### kernels ###
+    edge_kernel = np.array([[-1, -1, -1],
+                            [-1,  8, -1],
+                            [-1, -1, -1]], dtype=np.float32)
+
+    fade_kernel = np.array([[1, 1, 1, 1, 1],
+                            [1, 1, 1, 1, 1],
+                            [1, 1, 0, 1, 1],
+                            [1, 1, 1, 1, 1],
+                            [1, 1, 1, 1, 1]], dtype=np.float32) / 8
+
+    hor_kernel = np.array([[-1, 0, 1],
+                           [-2, 0, 2],
+                           [-1, 0, 1]], dtype=np.float32)
+    ver_kernel = np.array([[1, 2, 1],
+                           [0, 0, 0],
+                           [-1, -2, -1]], dtype=np.float32)
+
+    kernel_1d = cv2.getGaussianKernel(11, 0) # auto variance
+    gaussian_kernel = kernel_1d @ kernel_1d.T
+
+    conv = cv2.filter2D(gray, -1, gaussian_kernel)
+    borders = cv2.filter2D(gray, -1, edge_kernel)
+
+    #conv = cv2.bilateralFilter(gray, d=31, sigmaColor=100, sigmaSpace=100)
+    #conv = cv2.filter2D(gray, -1, 3 * edge_kernel)
+    #conv = cv2.filter2D(gray, -1, gaussian_kernel)
+
+    #conv = cv2.normalize(conv, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+
+    # Ensure uint8
+    #conv = conv.astype(np.uint8)
+
+    # Compute gradients using Sobel
+    grad_x = cv2.Sobel(conv, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(conv, cv2.CV_64F, 0, 1, ksize=3)
+
+    img_size = 500
+    max_steps = img_size * 2
+
+    # Convert image to B&W
+    vis = cv2.cvtColor(conv, cv2.COLOR_GRAY2BGR)
+
+    H, W = conv.shape
+    counter = np.zeros((H, W), dtype=int)
+    avg = np.zeros((H, W), dtype=float)
+    #num = np.zeros((H, W), dtyp=int)
+
+    cp = conv.copy()
+    cp = cv2.cvtColor(cp, cv2.COLOR_GRAY2BGR)
+
+    step = 1
+    for y in range(0, H, step):
+        for x in range(0, W, step):
+            dx = grad_x[y, x]
+            dy = grad_y[y, x]
+            smmm = 0
+
+            # Normalize vector length
+            length = np.sqrt(dx**2 + dy**2)
+
+            if length > 100 and conv[y, x] <= 120: ### [TODO] tune length threshold
+                dx = math.sqrt(2) * dx / length
+                dy = math.sqrt(2) * dy / length
+
+                cnt = 0
+                yl, xl = y, x
+                yn, xn = y, x
+                points = []
+                for st in range(max_steps):
+                    if not (0 <= int(xn) < W and 0 <= int(yn) < H) or (conv[int(yn), int(xn)] > 120):
+                        break
+
+                    #if not (int(xn) == int(xl)) or not (int(yn) == int(yl)) and abs(int(xn)-x) + abs(int(yn)-y) >= 0:
+                        #counter[int(yn), int(xn)] += max(0, 1 - abs(xn-int(xn)) - abs(yn-int(yn)))
+                        #counter[int(yn), int(xn)] += 1
+                        #counter[int(yn), int(xn)] += 1 / (np.pi * math.sqrt(abs(yn-y)**2 + abs(xn-x)**2) + 1)
+
+                    counter[int(yn), int(xn)] += 1
+
+                    y2 = int(yn)
+                    x2 = int(xn)
+                    avg[y2, x2] = (avg[y2, x2] * (counter[y2, x2]-1) + math.sqrt((y2-y)**2 + (x2-x)**2)) / counter[y2, x2]
+
+                    points.append([int(yn), int(xn)])
+                    cnt += 1
+
+                    yl, xl = yn, xn
+
+                    xn += -dx
+                    yn += -dy
+
+                ymid = (yl + y) / 2
+                xmid = (xl + x) / 2
+
+                #print(abs(grad_x[int(yl), int(xl)]*grad_y[int(y), int(x)] + grad_x[int(y), int(x)]*grad_y[int(yl), int(xl)]))
+                #if abs(grad_x[int(yl), int(xl)]*grad_y[int(y), int(x)] + grad_x[int(y), int(x)]*grad_y[int(yl), int(xl)]) < 10000:
+                #counter[int((yl + y) / 2), int((xl + x) / 2)] += 1
+
+                cv2.line(cp, (int(x), int(y)), (int(xl), int(yl)), color=(0, 0, 250), thickness=1)
+
+                #for i in range(len(points)):
+                    #counter[points[i][0], points[i][1]] += math.e**(-(i-len(points)/2)**2/5)
+
+                # Draw arrow (from (x,y) to (x+dx,y+dy))
+                #cv2.arrowedLine(vis, (x, y), (x+dx, y+dy), (0, 0, 255), 1, tipLength=0.3)
+
+    for i in range(H):
+        for j in range(W):
+            counter[i, j] = min(int(counter[i, j]), 66)
+            if counter[i, j] < 66:
+                counter[i, j] = 0
+            else:
+                print(avg[i, j])
+            pass
+
+    norm_grid = cv2.normalize(counter, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX)
+    norm_grid = norm_grid.astype(np.uint8)
+
+    #norm_grid = cv2.filter2D(norm_grid, -1, gaussian_kernel)
+    #norm_grid = cv2.filter2D(norm_grid, -1, fade_kernel)
+
+    mean_val = np.mean(norm_grid)
+
+    # Scale all pixels to have mean 128
+    #norm_grid = norm_grid + (128 - mean_val)
+
+    # Clip to valid range [0, 255]
+    #norm_grid = np.clip(norm_grid, 0, 255).astype(np.uint8)
+
+    thresholdValue = 230
+    _, thresh = cv2.threshold(norm_grid, thresholdValue, 255, cv2.THRESH_BINARY)
+    orgthresh = thresh.copy()
+    thresh = cv2.filter2D(thresh, -1, gaussian_kernel)
+    #thresh = norm_grid
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    #thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
+
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh)
+    num_circles = num_labels - 1  # subtract 1 to exclude background
+
+    # This is the line from your question
+    numLabels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh)
+
+    radius = np.zeros(num_labels)
+
+    # Loop through each component, starting from 1 (0 is the background)
+    for componentId in range(1, numLabels):
+        # Find the coordinates of all pixels belonging to the current component
+        # np.where returns a tuple of two arrays: (y_coordinates, x_coordinates)
+        componentCoordinates = np.where(labels == componentId)
+
+        # To get (x, y) pairs, you can stack them
+        points = np.column_stack((componentCoordinates[0], componentCoordinates[1]))
+
+        # Now 'points' is a NumPy array of shape (N, 2) where N is the
+        # number of pixels in the component. Each row is an (x, y) coordinate.
+        print(f"--- Component {componentId} ({len(points)} pixels) ---")
+        # You can now loop through the individual points if needed
+        # for point in points:
+        #     x, y = point
+        #     # Do something with the point (x, y)
+
+        avvg = 0
+        ll = []
+        cntt = 0
+        for i in points:
+            if orgthresh[i[0], i[1]] > 250:
+                ll.append(avg[i[0], i[1]])
+                cntt += 1
+                avvg += avg[i[0], i[1]]
+        avvg /= cntt
+        #radius[componentId] = most_crowded_value(ll)
+        print(ll)
+        radius[componentId] = avvg
+
+    answer = 0
+
+    if len(radius) > 1:
+
+        print(radius[1])
+
+        _, darkPixelsMask = cv2.threshold(conv, 250, 255, cv2.THRESH_BINARY_INV)
+        darkAreas = [-1]
+
+        # 3. Iterate through each circle
+        for center, rad in zip(centroids[1:], radius[1:]):
+            # Create a black mask for the current circle's ROI
+            circleMask = np.zeros((H, W), dtype=np.uint8)
+
+            # Convert float coordinates/rad to int for drawing
+            centerInt = (int(center[0]), int(center[1]))
+            radiusInt = int(rad)
+
+            # Draw a filled white circle on the mask
+            cv2.circle(circleMask, centerInt, radiusInt, 255, -1)
+
+            # 4. Use bitwise AND to isolate the dark pixels that are inside the circle
+            darkPixelsInCircle = cv2.bitwise_and(darkPixelsMask, darkPixelsMask, mask=circleMask)
+
+            # 5. Count the white pixels (the dark pixels in the ROI) to get the area
+            area = cv2.countNonZero(darkPixelsInCircle)
+            darkAreas.append(area)
+
+        #thresh = cv2.filter2D(thresh, -1, 1/2 * gaussian_kernel)
+
+        conv = cv2.cvtColor(conv, cv2.COLOR_GRAY2BGR)
+
+        answer = 0
+        print(darkAreas[1])
+        for i in range(1, len(darkAreas)):
+            print(radius[i], ' ', darkAreas[i])
+            if abs(1 - darkAreas[i] / (radius[i]**2 * math.pi)) < 0.3:
+                answer += 1
+                # 🎯 Draw centroid (as a circle or cross)
+            cv2.circle(conv, (int(centroids[i][0]), int(centroids[i][1])), int(radius[i]), (0, 255, 0), 2)  # green
+            cv2.circle(conv, (int(centroids[i][0]), int(centroids[i][1])), 2, (0, 0, 255), -1)  # red filled circle
+
+
+    cv2.imshow("Counters", norm_grid)
+    cv2.imshow("Thresholds", thresh)
+    cv2.imshow("conv", conv)
+    cv2.imshow("cp", cp)
+    cv2.imshow("borders", borders)
+
+    #cv2.imshow("Gradient vectors", vis)
+
+    while True:
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord('q'):
+            break
+    cv2.destroyAllWindows()
+
+    return answer
+
+
+def loadImage(file_name):
+    if not (os.path.isfile(file_name) and os.access(file_name, os.R_OK)):
+        print(f"'{file_name}' does not exist or isn't readable.")
+        return None
+
+    img = cv2.imread(file_name)
+    if img is None:
+        print(f"Failed to load '{file_name}'.")
+        return None
+
+    return img
+
+
+def main(args):
+    if len(args) == 0:
+        print("No image provided!")
+        return
+
+    img = loadImage(args[0])
+    if not img is None:
+        print(findDisks(img))
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
